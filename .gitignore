@@ -1,0 +1,20 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Authentication files - VERY IMPORTANT
+auth/accounts/*.json
+auth/auth_token.txt
+
+# Local data & outputs
+/data/
+latest_leads.csv
+*.csv
+
+# Debug files
+*.png
+*.html
+
+# IDE / OS files
+.vscode/
+.DS_Store
