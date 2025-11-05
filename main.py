@@ -92,7 +92,7 @@ def run_with_account_rotation(logger, account_list: list, headless: bool = True)
     
     try:
         # Use the built-in rotation function
-        raw_leads = scraper.run_with_rotation(account_list)
+        raw_leads = scraper.run_with_rotation(account_list, headless)
         logger.info(f"Scout finished. Found {len(raw_leads)} raw profiles.")
         return raw_leads
         

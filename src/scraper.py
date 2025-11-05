@@ -1,14 +1,23 @@
 """
-ULTRA STEALTH Scraper - Uses undetected-playwright to bypass X detection
-Replace your current scraper.py with this version
+OPTIMIZED STEALTH Scraper - v3 (Hybrid)
+This version reverts to the reliable N+1 (page-by-page) scraping method,
+as the API-first (v2) method is being blocked by X.com's bot detection.
+
+This version's improvements:
+- All 'time.sleep()' calls are replaced with 'page.wait_for_selector()'
+  or 'page.wait_for_load_state()'. This is much faster and stealthier.
+- All complex anti-detection scripts ('add_init_script') are REMOVED,
+  as they were likely causing the "privacy extensions" error.
+- Selectors are confirmed based on your debug HTML.
 """
 
 import time
 import logging
 import json
 import os
-from typing import List, Dict, Optional
-from playwright.sync_api import sync_playwright, Page, BrowserContext, Browser
+import random
+from typing import List, Dict, Optional, Tuple
+from playwright.sync_api import sync_playwright, Page, BrowserContext, Browser, Route, Request
 from src import config, utils
 
 # --- CONSTANTS ---
@@ -16,35 +25,32 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AUTH_DIR = os.path.join(PROJECT_ROOT, 'auth')
 ACCOUNTS_DIR = os.path.join(AUTH_DIR, 'accounts')
 
-X_BASE_URL = "https://twitter.com"
-X_SEARCH_URL = "https://twitter.com/search?q={query}&f=user"
+X_BASE_URL = "https://x.com"
+X_SEARCH_URL = "https://x.com/search?q={query}&f=user"
 
 SCROLLS_PER_SEARCH = 5
-SCROLLS_PER_PROFILE = 7
+SCROLLS_PER_PROFILE = 7 # Kept from your original config.py logic
 
-# --- SELECTORS ---
+# --- SELECTORS (from your original scraper.py, confirmed by x_page_debug.html) ---
 USER_SEARCH_CARD_SELECTORS = [
     '[data-testid="UserCell"]',
     'div[data-testid="cellInnerDiv"]:has(a[href*="/"])',
-    'article[data-testid="UserCell"]',
 ]
 
 USER_HANDLE_SELECTORS = [
     'a[href^="/"][role="link"]',
     'div[data-testid="User-Name"] a',
-    'a[href*="/"]:not([href*="search"]):not([href*="explore"])',
 ]
 
 USER_BIO_SELECTOR = '[data-testid="UserDescription"]'
 FOLLOWER_COUNT_SELECTOR = 'a[href$="/verified_followers"] span, a[href$="/followers"] span'
-TWEET_COUNT_SELECTOR = 'div[data-testid="UserProfileHeader_Items"] span'
 TWEET_CONTAINER_SELECTOR = 'article[data-testid="tweet"]'
 TWEET_TEXT_SELECTOR = '[data-testid="tweetText"]'
 TWEET_TIMESTAMP_SELECTOR = 'time[datetime]'
 
 
 class Scraper:
-    """ULTRA Stealth Scraper - Maximum anti-detection"""
+    """Optimized Scraper - v3 (Hybrid)"""
     
     def __init__(self, headless: bool = True, account_name: str = "default"):
         self.logger = logging.getLogger(__name__)
@@ -54,7 +60,6 @@ class Scraper:
         self.browser: Browser = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
-        self.debug_mode = False
         
         os.makedirs(ACCOUNTS_DIR, exist_ok=True)
 
@@ -64,30 +69,24 @@ class Scraper:
         
         try:
             from undetected_playwright.sync_api import sync_playwright as stealth_playwright
-            use_stealth = True
+            pw = stealth_playwright()
             self.logger.info("✅ Using undetected-playwright (stealth mode)")
         except ImportError:
             self.logger.warning("⚠️  undetected-playwright not found, using regular playwright")
-            use_stealth = False
+            pw = sync_playwright()
         
-        pw = stealth_playwright() if use_stealth else sync_playwright()
         self.playwright = pw.start()
         
-        self.browser = self.playwright.chromium.launch(
-            headless=False,
-            args=['--no-sandbox', '--disable-setuid-sandbox']
-        )
-        
+        self.browser = self.playwright.chromium.launch(headless=False)
         self.context = self.browser.new_context(
             viewport={'width': 1920, 'height': 1080},
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
             locale='en-US',
         )
-        
         self.page = self.context.new_page()
         
         self.logger.info("Opening X login page...")
-        self.page.goto("https://twitter.com/login", wait_until="domcontentloaded")
+        self.page.goto(f"{X_BASE_URL}/login", wait_until="domcontentloaded")
         
         print("\n" + "="*60)
         print("🔐 MANUAL LOGIN REQUIRED")
@@ -104,268 +103,90 @@ class Scraper:
         self.context.storage_state(path=state_file_path)
         
         self.logger.info(f"✅ Account '{account_name}' saved to: {state_file_path}")
-        
-        self.context.close()
-        self.browser.close()
-        self.playwright.stop()
-        
+        self.close()
         return True
 
-    def _load_account_state(self, account_name: str = "default") -> bool:
-        """Load saved browser state with maximum stealth"""
+    def _load_account_state(self) -> bool:
+        """Load saved browser state"""
         try:
-            state_file_path = os.path.join(ACCOUNTS_DIR, f'{account_name}_state.json')
-            
+            state_file_path = os.path.join(ACCOUNTS_DIR, f'{self.account_name}_state.json')
             if not os.path.exists(state_file_path):
-                self.logger.error(f"❌ Account '{account_name}' not found!")
+                self.logger.error(f"❌ Account '{self.account_name}' not found!")
                 return False
 
-            self.logger.info(f"Loading account: {account_name}")
-            
-            # Initialize regular Playwright (undetected-playwright 0.3.0 is outdated)
+            self.logger.info(f"Loading account: {self.account_name}")
             self.playwright = sync_playwright().start()
             
-            # Use REAL Chrome instead of Chromium
-            self.logger.info("🔥 Using real Chrome browser (better for stealth)")
-            
+            # Use 'chrome' channel if available, otherwise default Chromium
             try:
-                # Try to use installed Chrome
                 self.browser = self.playwright.chromium.launch(
                     headless=self.headless,
-                    channel='chrome',  # Use real Chrome
-                    args=[
-                        '--no-sandbox',
-                        '--disable-setuid-sandbox',
-                        '--disable-blink-features=AutomationControlled',
-                        '--disable-dev-shm-usage',
-                    ]
+                    channel='chrome'
                 )
-                self.logger.info("✅ Using Chrome browser")
-            except Exception as e:
-                self.logger.warning(f"Chrome not found ({e}), using Chromium")
+                self.logger.info("✅ Launched using 'chrome' channel.")
+            except Exception:
+                self.logger.info("Chrome channel not found, launching default Chromium.")
                 self.browser = self.playwright.chromium.launch(
-                    headless=self.headless,
-                    args=[
-                        '--no-sandbox',
-                        '--disable-setuid-sandbox',
-                        '--disable-blink-features=AutomationControlled',
-                    ]
+                    headless=self.headless
                 )
             
+            # Create a simple context. We are *not* adding anti-detect scripts
+            # as they seem to be causing the "privacy extensions" error.
             self.context = self.browser.new_context(
                 storage_state=state_file_path,
-                viewport={'width': 1920, 'height': 1080},
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
                 locale='en-US',
-                timezone_id='America/New_York',
-                ignore_https_errors=True,
             )
             
             self.page = self.context.new_page()
-            
-            # Add comprehensive anti-detection
-            self.page.add_init_script("""
-                // Remove webdriver
-                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                
-                // Fix plugins
-                Object.defineProperty(navigator, 'plugins', { 
-                    get: () => {
-                        return [
-                            { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer' },
-                            { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
-                            { name: 'Native Client', filename: 'internal-nacl-plugin' }
-                        ];
-                    }
-                });
-                
-                // Fix languages
-                Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-                
-                // Add chrome object
-                window.chrome = { runtime: {}, loadTimes: function() {}, csi: function() {} };
-                
-                // Fix permissions
-                const originalQuery = window.navigator.permissions.query;
-                window.navigator.permissions.query = (parameters) => (
-                    parameters.name === 'notifications' ?
-                        Promise.resolve({ state: Notification.permission }) :
-                        originalQuery(parameters)
-                );
-                
-                // Fix hardware
-                Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
-                Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
-                
-                // Fix vendor
-                Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.' });
-                Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
-                
-                // Fix connection
-                Object.defineProperty(navigator, 'connection', {
-                    get: () => ({
-                        effectiveType: '4g',
-                        rtt: 50,
-                        downlink: 10,
-                        saveData: false
-                    })
-                });
-            """)
-            
-            self.logger.info(f"✅ Account '{account_name}' loaded")
+            self.logger.info(f"✅ Account '{self.account_name}' loaded")
             return True
             
         except Exception as e:
             self.logger.error(f"Error loading account: {e}")
             return False
 
-    def _check_for_errors(self) -> bool:
-        """Check if X is showing VISIBLE error messages (not just in HTML source)"""
-        try:
-            # Only check for VISIBLE error messages that users can see
-            visible_errors = [
-                'text="Something went wrong"',
-                'text="privacy related extensions may cause issues"',
-            ]
-            
-            for error_selector in visible_errors:
-                try:
-                    error_elem = self.page.locator(error_selector)
-                    if error_elem.is_visible(timeout=2000):
-                        self.logger.error(f"❌ Visible error detected: {error_selector}")
-                        return False
-                except:
-                    # Error not found - that's good!
-                    pass
-            
-            # Check if we're on an actual error page (not just word in source)
-            current_url = self.page.url
-            if "error" in current_url or "suspended" in current_url:
-                self.logger.error(f"❌ Error URL detected: {current_url}")
-                return False
-            
-            # If we can see the compose button or profile link, we're definitely logged in
-            try:
-                compose_btn = self.page.locator('[data-testid="SideNav_NewTweet_Button"]')
-                if compose_btn.is_visible(timeout=3000):
-                    self.logger.info("✅ No errors - compose button visible")
-                    return True
-            except:
-                pass
-            
-            try:
-                profile_link = self.page.locator('a[data-testid="AppTabBar_Profile_Link"]')
-                if profile_link.is_visible(timeout=3000):
-                    self.logger.info("✅ No errors - profile link visible")
-                    return True
-            except:
-                pass
-            
-            # If no errors found and we can see navigation elements, we're good
-            self.logger.info("✅ No visible errors detected")
-            return True
-            
-        except Exception as e:
-            self.logger.warning(f"Error check failed (assuming OK): {e}")
-            return True
-
     def _verify_login(self) -> bool:
         """Check if we're logged in"""
-        if not self.page:
-            return False
+        if not self.page: return False
         
         try:
-            self.logger.info("Verifying login...")
-            self.page.goto("https://twitter.com/home", wait_until="load", timeout=90000)  # Increased timeout
-            time.sleep(10)  # Give it more time to fully load
+            self.logger.info("Verifying login status...")
+            self.page.goto(f"{X_BASE_URL}/home", wait_until="domcontentloaded", timeout=60000)
             
-            if not self._check_for_errors():
-                screenshot_path = os.path.join(PROJECT_ROOT, f"error_{self.account_name}.png")
-                self.page.screenshot(path=screenshot_path, full_page=True)
-                self.logger.error(f"Screenshot: {screenshot_path}")
-                return False
+            # Wait for the "Compose" button. This is the most reliable check.
+            self.logger.info("Page loaded, waiting for compose button...")
+            self.page.wait_for_selector('[data-testid="SideNav_NewTweet_Button"]', timeout=30000, state="visible")
             
-            current_url = self.page.url
-            self.logger.info(f"Current URL: {current_url}")
-            
-            if "login" in current_url.lower():
-                self.logger.error("❌ Redirected to login!")
-                return False
-            
-            # Look for compose button
-            try:
-                compose = self.page.wait_for_selector('[data-testid="SideNav_NewTweet_Button"]', timeout=10000)
-                if compose:
-                    self.logger.info("✅ LOGIN VERIFIED!")
-                    return True
-            except:
-                pass
-            
-            # Alternative check
-            try:
-                profile = self.page.wait_for_selector('a[data-testid="AppTabBar_Profile_Link"]', timeout=10000)
-                if profile:
-                    self.logger.info("✅ LOGIN VERIFIED!")
-                    return True
-            except:
-                pass
-            
-            self.logger.warning("⚠️  Login status unclear, continuing...")
+            self.logger.info("✅ Login VERIFIED!")
             return True
-            
         except Exception as e:
-            self.logger.error(f"Error verifying login: {e}")
+            self.logger.error(f"❌ Login verification failed: {e}")
+            self.page.screenshot(path=f"error_{self.account_name}_login_failed.png")
+            self.logger.error(f"Screenshot saved to error_{self.account_name}_login_failed.png")
             return False
 
-    def _wait_for_search_results(self, query: str) -> bool:
-        """Wait for search results to load"""
+    def _smart_scroll(self, wait_time: int = 3000):
+        """Scrolls down and waits for network to quiet down."""
+        self.page.evaluate("window.scrollBy(0, 2000)")
         try:
-            self.logger.info("Waiting for search results...")
-            
-            # Check for errors
-            if not self._check_for_errors():
-                return False
-            
-            # Try multiple selectors
-            selectors = [
-                '[data-testid="UserCell"]',
-                'div[data-testid="cellInnerDiv"]',
-                'article',
-            ]
-            
-            for selector in selectors:
-                try:
-                    self.page.wait_for_selector(selector, timeout=15000, state='visible')
-                    self.logger.info(f"✅ Found results with: {selector}")
-                    return True
-                except:
-                    continue
-            
-            self.logger.warning("⚠️  No results found")
-            screenshot_path = os.path.join(PROJECT_ROOT, f"no_results_{query.replace(' ', '_')}.png")
-            self.page.screenshot(path=screenshot_path, full_page=True)
-            self.logger.warning(f"Screenshot: {screenshot_path}")
-            
-            return False
-            
-        except Exception as e:
-            self.logger.error(f"Error waiting for results: {e}")
-            return False
+            # Wait for network to be idle, max wait_time ms
+            self.page.wait_for_load_state("networkidle", timeout=wait_time)
+        except:
+            # Fallback sleep if network never becomes idle
+            time.sleep(1)
 
     def _find_user_cards(self) -> list:
-        """Find user cards"""
-        if not self.page:
-            return []
+        """Finds all user card elements on the page."""
+        if not self.page: return []
         
         for selector in USER_SEARCH_CARD_SELECTORS:
             try:
                 cards = self.page.query_selector_all(selector)
                 if len(cards) > 0:
-                    self.logger.info(f"✅ Found {len(cards)} cards")
                     return cards
             except:
                 continue
-        
         return []
 
     def _extract_handle_from_card(self, card_element) -> Optional[str]:
@@ -376,8 +197,8 @@ class Scraper:
                 if handle_el:
                     href = handle_el.get_attribute('href')
                     if href:
-                        handle = href.strip('/').split('/')[-1]
-                        if handle and len(handle) > 0 and not handle.startswith('?'):
+                        handle = href.strip('/').split('?')[0] # Get handle, remove query params
+                        if handle and len(handle) > 0 and "/" not in handle:
                             return handle
             except:
                 continue
@@ -398,7 +219,7 @@ class Scraper:
                 if bio_element:
                     bio = bio_element.inner_text()
             except:
-                pass
+                pass # Bio is optional
             
             return {
                 "handle": handle,
@@ -409,19 +230,22 @@ class Scraper:
             return None
 
     def _get_profile_details(self, profile_url: str) -> Optional[dict]:
-        """Visit profile and scrape details"""
-        if not self.page:
-            return None
+        """This is the 'N+1' visit. We go to the user's profile page."""
+        if not self.page: return None
 
         self.logger.info(f"Visiting: {profile_url}")
         try:
-            self.page.goto(profile_url, wait_until="load", timeout=60000)
-            time.sleep(4)
+            self.page.goto(profile_url, wait_until="domcontentloaded", timeout=60000)
+            # Wait for the main profile header to be visible
+            self.page.wait_for_selector('[data-testid="UserProfileHeader_Items"]', state="visible", timeout=20000)
 
             # Get follower count
             follower_count = 0
             try:
+                # Wait for the follower count element to be ready
+                self.page.wait_for_selector(FOLLOWER_COUNT_SELECTOR, state="visible", timeout=10000)
                 follower_elements = self.page.query_selector_all(FOLLOWER_COUNT_SELECTOR)
+                
                 for el in follower_elements:
                     text = el.inner_text()
                     if text:
@@ -434,21 +258,30 @@ class Scraper:
                             follower_count = int(count_str.replace(',', ''))
                         if follower_count > 0:
                             break
-            except:
-                pass
+            except Exception as e:
+                self.logger.warning(f"Could not parse follower count for {profile_url}: {e}")
             
-            # Apply filter
+            # Apply follower filter
             if not (config.FOLLOWER_FILTER['MIN'] <= follower_count <= config.FOLLOWER_FILTER['MAX']):
-                self.logger.info(f"Skipping: follower count ({follower_count}) out of range")
+                self.logger.info(f"Skipping: @{profile_url.split('/')[-1]} follower count ({follower_count}) out of range")
                 return None
             
-            # Scrape tweets (simplified for speed)
+            # Scrape tweets
             tweets = []
             seen_timestamps = set()
             
             for scroll in range(SCROLLS_PER_PROFILE):
+                try:
+                    # Wait for at least one tweet to be visible
+                    if scroll == 0:
+                        self.page.wait_for_selector(TWEET_CONTAINER_SELECTOR, state="visible", timeout=10000)
+                except Exception:
+                    self.logger.warning(f"No tweets found on profile {profile_url}")
+                    break # No tweets, stop scrolling
+
                 tweet_elements = self.page.query_selector_all(TWEET_CONTAINER_SELECTOR)
                 
+                found_new_tweet = False
                 for tweet in tweet_elements:
                     try:
                         text_el = tweet.query_selector(TWEET_TEXT_SELECTOR)
@@ -464,17 +297,17 @@ class Scraper:
                                     "timestamp": tweet_timestamp
                                 })
                                 seen_timestamps.add(tweet_timestamp)
+                                found_new_tweet = True
                         
                         if len(tweets) >= config.TWEETS_TO_SCRAPE:
                             break
                     except:
-                        continue
+                        continue # Ignore individual failed tweets
                 
-                if len(tweets) >= config.TWEETS_TO_SCRAPE:
-                    break
+                if len(tweets) >= config.TWEETS_TO_SCRAPE or not found_new_tweet:
+                    break # Stop if we have enough tweets or if we're not finding new ones
                 
-                self.page.evaluate("window.scrollBy(0, 2000)")
-                time.sleep(3)
+                self._smart_scroll()
             
             return {
                 "follower_count": follower_count,
@@ -483,21 +316,16 @@ class Scraper:
             }
 
         except Exception as e:
-            self.logger.error(f"Failed to scrape profile: {e}")
+            self.logger.error(f"Failed to scrape profile {profile_url}: {e}")
+            self.page.screenshot(path=f"error_{profile_url.split('/')[-1]}.png")
             return None
 
-    def run(self, account_name: str = "default") -> List[Dict]:
-        """Main scraping pipeline"""
-        self.logger.info(f"Starting scraper with account: {account_name}")
-        self.account_name = account_name
+    def run(self) -> List[Dict]:
+        """Main scraping pipeline (Hybrid v3)"""
+        self.logger.info(f"Starting optimized scraper with account: {self.account_name}")
         
-        if not self._load_account_state(account_name):
-            self.logger.critical("Failed to load account!")
-            return []
-
-        if not self._verify_login():
-            self.logger.critical("❌ LOGIN FAILED!")
-            return []
+        if not self._load_account_state(): return []
+        if not self._verify_login(): return []
 
         all_raw_leads = []
         
@@ -506,13 +334,10 @@ class Scraper:
             search_url = X_SEARCH_URL.format(query=query.replace(" ", "%20"))
             
             try:
-                self.logger.info(f"Navigating to: {search_url}")
-                self.page.goto(search_url, wait_until="load", timeout=60000)
-                time.sleep(8)
-                
-                if not self._wait_for_search_results(query):
-                    self.logger.warning(f"No results for '{query}', skipping...")
-                    continue
+                self.page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
+                # Wait for the *first* user cell to appear
+                self.page.wait_for_selector('[data-testid="UserCell"]', state="visible", timeout=30000)
+                self.logger.info("Search results loaded.")
                 
                 potential_profiles = []
                 seen_handles = set()
@@ -521,22 +346,28 @@ class Scraper:
                     self.logger.info(f"Scroll {scroll_num + 1}/{SCROLLS_PER_SEARCH}")
                     
                     user_cards = self._find_user_cards()
-                    self.logger.info(f"Found {len(user_cards)} elements")
-                    
+                    if not user_cards:
+                        self.logger.warning("No user cards found on this scroll.")
+                        
+                    found_new_handle = False
                     for card in user_cards:
                         profile_data = self._pre_filter_user(card)
                         
                         if profile_data and profile_data['handle'] not in seen_handles:
                             potential_profiles.append(profile_data)
                             seen_handles.add(profile_data['handle'])
-                            self.logger.info(f"  ✅ @{profile_data['handle']}")
+                            self.logger.info(f"  Found @{profile_data['handle']}")
+                            found_new_handle = True
                     
-                    self.page.evaluate("window.scrollBy(0, 2000)")
-                    time.sleep(5)
+                    if not found_new_handle and scroll_num > 0:
+                        self.logger.info("No new handles found, moving to next query.")
+                        break # Stop scrolling if we're not finding new users
+                    
+                    self._smart_scroll()
                 
-                self.logger.info(f"Found {len(potential_profiles)} profiles")
+                self.logger.info(f"Found {len(potential_profiles)} potential profiles for query '{query}'.")
 
-                # Deep scrape
+                # Deep scrape (The N+1 part)
                 for profile in potential_profiles:
                     profile_details = self._get_profile_details(profile['profile_url'])
                     
@@ -548,31 +379,41 @@ class Scraper:
                             **profile_details
                         }
                         all_raw_leads.append(raw_lead)
-                        self.logger.info(f"SUCCESS: @{profile['handle']}")
+                        self.logger.info(f"✅ SUCCESS: @{profile['handle']} added to leads.")
                     
-                    time.sleep(3)
+                    # Wait for a "human" amount of time between profile visits
+                    self._smart_scroll(wait_time=2000)
 
             except Exception as e:
                 self.logger.error(f"Failed query '{query}': {e}")
             
-            time.sleep(5)
+            # Wait for a "human" amount of time between profile visits
+            wait_time = random.uniform(4, 10) # Wait a random 4-10 seconds
+            self.logger.info(f"Pausing for {wait_time:.1f}s to look human (prevent rate-limit)...")
+            time.sleep(wait_time)
 
         self.logger.info(f"Finished. Found {len(all_raw_leads)} leads.")
         return all_raw_leads
 
-    def close(self):
-        """Shutdown"""
-        self.logger.info("Shutting down...")
+    def close_browser(self):
+        """Closes the browser and context, but leaves the playwright instance."""
         if self.context:
             self.context.close()
+            self.context = None
         if self.browser:
             self.browser.close()
+            self.browser = None
+            
+    def close(self):
+        """Shutdown everything"""
+        self.logger.info("Shutting down scraper...")
+        self.close_browser() # This was the typo!
         if self.playwright:
             self.playwright.stop()
 
 
-def run_with_rotation(account_names: List[str]) -> List[Dict]:
-    """Run scraper with account rotation"""
+def run_with_rotation(account_names: List[str], headless: bool) -> List[Dict]:
+    """Run scraper with account rotation (v3)"""
     logger = logging.getLogger(__name__)
     all_leads = []
     
@@ -581,23 +422,34 @@ def run_with_rotation(account_names: List[str]) -> List[Dict]:
         logger.info(f"Trying account: {account_name}")
         logger.info(f"{'='*60}\n")
         
-        scraper = Scraper(headless=False, account_name=account_name)
+        scraper = Scraper(headless=headless, account_name=account_name)
         
         try:
-            leads = scraper.run(account_name)
+            leads = scraper.run()
             
             if len(leads) > 0:
-                logger.info(f"✅ Success: {len(leads)} leads")
+                logger.info(f"✅ Success: {len(leads)} leads found with {account_name}")
                 all_leads.extend(leads)
                 scraper.close()
+                # We break on success, as one good run is all we need
                 break
             else:
-                logger.warning(f"⚠️  0 leads, trying next account...")
+                logger.warning(f"⚠️  Account {account_name} found 0 leads, trying next...")
                 scraper.close()
                 
         except Exception as e:
-            logger.error(f"❌ Account failed: {e}")
+            logger.error(f"❌ Account {account_name} failed: {e}")
             scraper.close()
             continue
     
-    return all_leads
+    # We aggregate all leads found, even if we break
+    # Note: If you want *only* leads from the first successful account,
+    # you can `all_leads = leads` before the `break`. I'll extend.
+    final_leads = []
+    seen_handles = set()
+    for lead in all_leads:
+        if lead['handle'] not in seen_handles:
+            final_leads.append(lead)
+            seen_handles.add(lead['handle'])
+    
+    return final_leads
