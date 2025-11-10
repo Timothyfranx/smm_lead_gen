@@ -1,170 +1,302 @@
 """
-This is the central configuration file for the SMM Lead Generation Bot.
-All keywords, filters, and settings are stored here for easy access and
-modification without touching the core scraper or analyzer code.
+OPTIMIZED SMM LEAD DETECTION CONFIG
+Focus: "Trying but failing" accounts in the 150-5K follower sweet spot
+Strategy: Fast, lean, high-conversion searches
 """
 
-# ----------------------------------------------------------------------------
+# ============================================================================
 # CORE FILTERS & SETTINGS
-# ----------------------------------------------------------------------------
+# ============================================================================
 
-# The main follower filter to pre-qualify accounts.
-# We will only scrape profiles within this range.
 FOLLOWER_FILTER = {
     'MIN': 150,
-    'MAX': 10000
+    'MAX': 5000  # Changed from 10K - better conversion rate
 }
 
-# The number of recent tweets to scrape from each profile's timeline
-# for analysis.
-TWEETS_TO_SCRAPE = 50
+# Reduced from 50 to 20 - faster scraping, still enough to detect patterns
+TWEETS_TO_SCRAPE = 20
 
-# ----------------------------------------------------------------------------
-# SCRAPER CONFIGURATION
-# ----------------------------------------------------------------------------
+# ============================================================================
+# SMART SEARCH QUERIES - Using X Advanced Operators
+# ============================================================================
 
-# Broad, general search queries for the "Scout" (scraper.py) to use.
-# The "Strategist" (analyzer.py) will do the smart filtering later.
-SEARCH_QUERIES = [
-    "AI founder",
-    "web3 builder",
-    "AI startup",
-    "web3 project",
-    "building in public",
-    "AI app",
-    "onchain",
-    "crypto founder",
-    "LLM"
+# HIGH-INTENT: Self-aware accounts (know they need help)
+HIGH_INTENT_SEARCHES = [
+    # Direct struggle admissions
+    '("need to post more" OR "should tweet more" OR "need to be more consistent") (founder OR startup OR ceo) lang:en -job -hiring',
+    '("bad at twitter" OR "terrible at social media" OR "struggling with posting") (founder OR builder) lang:en -job',
+    '("no engagement" OR "posting into void" OR "algorithm hates me") (founder OR startup) lang:en -bot',
+    '("can\'t keep up" OR "too busy to post" OR "no time for twitter") founder lang:en -job -hiring',
+    '("getting back to" OR "trying to be more active" OR "haven\'t posted") (founder OR ceo) lang:en',
 ]
 
-# ----------------------------------------------------------------------------
-# ANALYSIS RULES (TIERS & GAPS)
-# ----------------------------------------------------------------------------
+# MEDIUM-INTENT: Active builders in target niches
+MEDIUM_INTENT_SEARCHES = [
+    # AI founders (unverified = more likely to need help)
+    '((founder OR ceo OR builder) (ai OR llm OR "machine learning") lang:en) -filter:verified -job -hiring -bot',
+    '((founder OR ceo) ("ai startup" OR "ai tool" OR "ai app") lang:en) -filter:verified -job',
+    '("building" (ai OR "artificial intelligence" OR llm) founder lang:en) -job -hiring',
+    
+    # Web3 builders (notoriously bad at marketing)
+    '((founder OR builder OR ceo) (web3 OR crypto OR blockchain) lang:en) -filter:verified -nft -job -hiring',
+    '((founder OR ceo) (defi OR onchain OR "web3 project") lang:en) -filter:verified -job',
+    
+    # "Building in public" crowd (trying but often struggling)
+    '("building in public" (founder OR indie OR solo) lang:en) -"looking for" -job -hiring',
+    '(("indie hacker" OR solopreneur OR "solo founder") lang:en) -filter:verified -job',
+]
 
-# Defines the "Activity Gap" to classify how active a user is.
-# (Min_Days, Max_Days)
+# FUNDED-BUT-STRUGGLING: Has budget but visibility sucks
+FUNDED_SEARCHES = [
+    # Recent funding (has money for SMM)
+    '((raised OR "just raised" OR funded) (seed OR "pre-seed") (founder OR startup) lang:en) since:2024-06-01 -job -hiring',
+    '(("announced our" OR "closed our") (round OR funding OR seed) lang:en) since:2024-06-01 -job',
+    
+    # Accelerator grads (funded but often need marketing help)
+    '((yc OR "y combinator" OR techstars) (founder OR startup) lang:en) -job -hiring',
+    '(accelerator (founder OR startup OR ceo) lang:en) -"looking for" -job',
+]
+
+# Combine all tiers
+SEARCH_QUERIES = (
+    HIGH_INTENT_SEARCHES +      # Best leads, run first
+    MEDIUM_INTENT_SEARCHES +    # Good volume
+    FUNDED_SEARCHES             # High-value leads
+)
+
+# ============================================================================
+# POSTING PATTERN DETECTION
+# ============================================================================
+
+# What constitutes each posting pattern
+POSTING_PATTERNS = {
+    'erratic_active': {
+        'description': 'Posts 1-3x/week but inconsistently',
+        'avg_gap_days': (2, 7),        # Average 2-7 days between posts
+        'gap_variance': 4,              # High variance (inconsistent)
+        'max_days_since_last': 7,       # Must have posted in last week
+        'score_value': 40               # Highest score - perfect lead
+    },
+    'sparse_consistent': {
+        'description': 'Posts ~1x/week regularly',
+        'avg_gap_days': (7, 14),       # Average 7-14 days
+        'gap_variance': 3,              # Low variance (predictable)
+        'max_days_since_last': 14,      # Posted in last 2 weeks
+        'score_value': 30               # Good lead
+    },
+    'comeback_kid': {
+        'description': 'Was gone, just returned',
+        'avg_gap_days': (14, 90),      # Long gaps in history
+        'gap_variance': 10,             # Very high variance
+        'max_days_since_last': 7,       # But posted recently!
+        'score_value': 25               # Decent timing
+    },
+    'daily_poster': {
+        'description': 'Posts daily (already has system)',
+        'avg_gap_days': (0, 2),        # Posts almost daily
+        'gap_variance': 1,              # Very consistent
+        'max_days_since_last': 3,
+        'score_value': 0                # Skip - don't need help
+    },
+    'dormant': {
+        'description': 'Too inactive (30+ days)',
+        'avg_gap_days': (30, 9999),
+        'gap_variance': 999,
+        'max_days_since_last': 9999,
+        'score_value': 0                # Skip - too dead
+    }
+}
+
+# ============================================================================
+# STRUGGLE SIGNAL KEYWORDS
+# ============================================================================
+
+# TIER 1: Direct admissions (GOLD - 30 points)
+TIER1_STRUGGLE_KEYWORDS = [
+    "need to post more",
+    "should tweet more",
+    "need to be more consistent",
+    "bad at social media",
+    "terrible at twitter",
+    "struggling to stay active",
+    "can't keep up with posting",
+    "should engage more",
+]
+
+# TIER 2: Indirect frustration (GOOD - 20 points)
+TIER2_STRUGGLE_KEYWORDS = [
+    "no engagement",
+    "no one sees my tweets",
+    "posting into the void",
+    "algorithm hates me",
+    "reach is down",
+    "twitter is hard",
+    "no traction",
+    "haven't posted in a while",
+    "trying to be more active",
+    "getting back to posting",
+    "back to building in public",
+]
+
+# Combine for easy searching
+ALL_STRUGGLE_KEYWORDS = TIER1_STRUGGLE_KEYWORDS + TIER2_STRUGGLE_KEYWORDS
+
+# ============================================================================
+# PERSONA-SPECIFIC KEYWORDS (For Classification)
+# ============================================================================
+
+# FOUNDERS (Personal brand accounts)
+FOUNDER_BIO_KEYWORDS = [
+    "founder", "cofounder", "ceo", "cto", "maker", "builder",
+    "indie hacker", "solo founder", "creator", "entrepreneur",
+    "solopreneur", "founding engineer"
+]
+
+# PROJECTS (Brand/company accounts)
+PROJECT_BIO_KEYWORDS = [
+    "ai startup", "web3 project", "official", "team", "labs",
+    "platform", "protocol", "network", "studio", "dao",
+    "we're building", "our mission", "join us"
+]
+
+# Keep your original comprehensive lists too
+FOUNDER_TWEET_KEYWORDS = [
+    "been quiet lately", "taking a break", "back to building",
+    "haven't posted in a while", "getting back", "missed building",
+    "burnout", "regrouping", "pause", "step back"
+]
+
+PROJECT_TWEET_KEYWORDS = [
+    "we're live", "our beta", "mainnet launch", "just launched",
+    "join our discord", "join our telegram", "open beta",
+    "partnership", "integrated with", "grants program"
+]
+
+GENERAL_BIO_KEYWORDS = [
+    "ai", "web3", "crypto", "blockchain", "defi", "startup",
+    "building", "llm", "ml", "onchain"
+]
+
+HIGH_INTENT_TWEET_KEYWORDS = [
+    "just raised", "funded", "seed round", "hiring",
+    "launching soon", "building in public", "mvp"
+]
+
+# ============================================================================
+# LEAD SCORING WEIGHTS
+# ============================================================================
+
+# For FOUNDERS (Personal accounts)
+FOUNDER_SCORING = {
+    'posting_pattern': {
+        'erratic_active': 40,
+        'sparse_consistent': 30,
+        'comeback_kid': 25,
+        'daily_poster': 0,
+        'dormant': 0
+    },
+    'struggle_signals': {
+        'tier1_per_keyword': 15,    # 15 points per Tier 1 keyword (max 2)
+        'tier2_per_keyword': 10,    # 10 points per Tier 2 keyword (max 2)
+        'max_points': 30
+    },
+    'follower_tier': {
+        (500, 2000): 20,    # Sweet spot
+        (2001, 5000): 15,   # Good
+        (150, 499): 10      # Small but okay
+    },
+    'bonus': {
+        'has_founder_keywords': 10,
+        'is_funded': 10,
+        'posted_last_3_days': 5
+    }
+}
+
+# For PROJECTS (Brand accounts)
+PROJECT_SCORING = {
+    'posting_pattern': {
+        'erratic_active': 40,
+        'sparse_consistent': 30,
+        'comeback_kid': 25,
+        'daily_poster': 0,
+        'dormant': 0
+    },
+    'struggle_signals': {
+        'tier1_per_keyword': 15,
+        'tier2_per_keyword': 10,
+        'max_points': 30
+    },
+    'follower_tier': {
+        (1000, 3000): 20,   # Sweet spot for projects
+        (3001, 5000): 15,
+        (150, 999): 10
+    },
+    'bonus': {
+        'recently_launched': 10,    # "mvp", "beta", "just launched"
+        'is_funded': 10,
+        'posted_last_3_days': 5
+    }
+}
+
+# Score thresholds
+SCORE_GRADES = {
+    'A': (70, 100),   # HOT LEAD
+    'B': (50, 69),    # Qualified
+    'C': (30, 49),    # Maybe
+    'F': (0, 29)      # Skip
+}
+
+MIN_QUALIFYING_SCORE = 50  # Only export B-grade and above
+
+# ============================================================================
+# PERFORMANCE LIMITS (For your ancient PC)
+# ============================================================================
+
+SCRAPING_LIMITS = {
+    'max_profiles_per_query': 12,       # Don't over-scrape one query
+    'max_total_profiles': 40,           # Total to deep-scrape per run
+    'early_exit_threshold': 25,         # Stop if we have 25 B+ leads
+}
+
+# ============================================================================
+# ACTIVITY GAPS (Keep your original)
+# ============================================================================
+
 ACTIVITY_GAPS = {
     'Active': (0, 7),
     'Semi-Active': (8, 30),
     'Paused': (31, 90),
-    'Dormant': (91, 9999)  # 91+ days
+    'Dormant': (91, 9999)
 }
 
-# Defines the "Follower Tiers" for client segmentation.
-# (Min_Followers, Max_Followers)
+# ============================================================================
+# FOLLOWER TIERS (Updated for 150-5K range)
+# ============================================================================
+
 FOLLOWER_TIERS = {
-    'Tier 1': (500, 2000),
-    'Tier 2': (2001, 10000),
-    'Tier 3': (10001, 50000)
-    # Note: Our FOLLOWER_FILTER @ 10k max means we'll mostly see T1 & T2.
+    'Tier 0': (150, 499),     # Small
+    'Tier 1': (500, 2000),    # Sweet spot
+    'Tier 2': (2001, 5000),   # Good
 }
 
-# ----------------------------------------------------------------------------
-# PERSONA 1: "FOUNDER" KEYWORDS
-# ----------------------------------------------------------------------------
+# ============================================================================
+# OUTPUT CUSTOMIZATION
+# ============================================================================
 
-# Keywords to identify an individual (Founder, Builder, CEO).
-# Used to classify an account as `account_type = 'Person'`.
-FOUNDER_BIO_KEYWORDS = [
-    # Founder / Builder Terms
-    "founder", "cofounder", "ceo", "cto", "maker", "builder", "hacker",
-    "indie hacker", "solo founder", "bootstrapped", "creator", "entrepreneur",
-    "operator", "startup founder", "founding engineer", "early builder",
-    "creator economy", "side project", "startup studio", "solopreneur"
+OUTPUT_COLUMNS = [
+    'handle',
+    'account_type',              # Person or Project
+    'smm_need_score',            # 0-100 score
+    'score_grade',               # A, B, C, F
+    'score_reasons',             # Why they scored this way
+    'posting_pattern',           # erratic_active, sparse_consistent, etc.
+    'follower_count',
+    'follower_tier',
+    'days_since_last_post',
+    'struggle_keywords_found',   # List of keywords found
+    'struggle_tweets',           # Actual tweets showing struggle
+    'bio',
+    'profile_url'
 ]
 
-# Tweet keywords indicating a "Paused Founder" (burnout, inactivity).
-# These are strong signals for your SMM pitch.
-FOUNDER_TWEET_KEYWORDS = [
-    # Low Structure / Burnout Indicators
-    "been quiet lately", "taking a break", "back to building",
-    "haven’t posted in a while", "getting back", "missed building",
-    "restart", "rebooting project", "new start", "paused work",
-    "burnout", "regrouping", "pause", "step back"
-]
-
-# ----------------------------------------------------------------------------
-# PERSONA 2: "PROJECT" KEYWORDS
-# ----------------------------------------------------------------------------
-
-# Keywords to identify an organization (Project, Brand, Team).
-# Used to classify an account as `account_type = 'Project'`.
-PROJECT_BIO_KEYWORDS = [
-    # AI / Tech Projects
-    "ai startup", "ai project", "ai app", "ai tool", "ai platform", "llm platform",
-    "autonomous agents", "genai app", "ai saas", "ai research lab", "ai infra",
-    "ai model", "ai api", "ai sdk", "ai framework", "llm fine-tuning",
-    "ai chatbot", "ai studio", "ai team", "ai product launch",
-
-    # Web3 / Crypto Projects
-    "web3 project", "crypto project", "onchain protocol", "defi platform",
-    "nft marketplace", "nft project", "dao community", "token project",
-    "smart contract", "blockchain project", "layer2 project", "zk-rollup",
-    "zk proof", "wallet", "dex", "bridge", "airdrops", "ido", "ido launch",
-    "launchpad", "staking platform", "governance protocol", "validator node",
-    "chain infra",
-
-    # General Brand / Product Language
-    "official", "team", "project", "platform", "startup", "product",
-    "community", "ecosystem", "labs", "studio", "network", "protocol",
-    "foundation", "dao", "hq", "collective", "devs", "core team"
-]
-
-# Tweet keywords indicating an "Inefficient Project" (e.g., product/community focus).
-PROJECT_TWEET_KEYWORDS = [
-    # Launch / Milestone
-    "we’re live", "our beta is out", "mainnet launch", "testnet live",
-    "public alpha", "mvp ready", "just launched", "product demo",
-    "feature update", "v2 release", "changelog", "new integration",
-    "announcement", "dev update", "v1", "v2",
-
-    # Community / Growth
-    "join our discord", "join our telegram", "open beta", "open waitlist",
-    "be part of", "early access", "feedback wanted", "building our community",
-    "help us test", "thanks for 1k followers", "update thread", "link in bio",
-
-    # Funding / Partners
-    "partnership", "integrated with", "collaborating with",
-    "ecosystem partner", "grants program", "joined accelerator"
-]
-
-# ----------------------------------------------------------------------------
-# GENERAL HIGH-INTENT KEYWORDS (For all personas)
-# ----------------------------------------------------------------------------
-
-# General contextual keywords for all accounts.
-# These help identify topics of interest (AI, Web3, etc.)
-GENERAL_BIO_KEYWORDS = [
-    # AI / Tech
-    "ai", "artificial intelligence", "machine learning", "ml", "deep learning",
-    "data scientist", "nlp", "genai", "llm", "langchain", "rag", "ai developer",
-    "ai engineer",
-
-    # Web3 / Crypto
-    "web3", "onchain", "crypto", "defi", "blockchain", "nft", "dao", "token",
-    "metaverse", "dapp", "solidity", "layer2", "zk", "eth", "solana",
-    "polygon", "base",
-
-    # Business / Growth
-    "seed", "raising", "funded", "backed by", "investor", "angel", "vc",
-    "series a", "demo day", "stealth mode", "growth", "traction", "accelerator",
-
-    # Communication
-    "telegram", "discord", "substack", "newsletter", "waitlist"
-]
-
-# High-signal tweet keywords relevant to *all* personas (e.g., funding, hiring).
-HIGH_INTENT_TWEET_KEYWORDS = [
-    # Funding / Business
-    "just raised", "closed our round", "funded", "seed round", "pre-seed",
-    "announced our raise", "demo day", "pitching", "backed by",
-    "angel round", "runway", "vc funded",
-
-    # Hiring / Team
-    "hiring", "looking for", "join our team", "need a", "collaborate",
-    "work with us", "cofounder wanted", "searching for a", "open position",
-
-    # Launch / Product
-    "launching soon", "mvp live", "try the demo", "building in public",
-    "feedback welcome", "working on", "new project", "prototype"
-]
+SORT_PRIORITY = ['smm_need_score', 'follower_count']

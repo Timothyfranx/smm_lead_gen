@@ -1,30 +1,25 @@
 """
-This is the "Strategist" (analyzer.py) module.
-Its job is to:
-1. Take the "raw data" list from the Scraper.
-2. Load it into a pandas DataFrame.
-3. Apply all the complex business logic from config.py:
-    - Classify accounts ('Person' or 'Project').
-    - Analyze activity gaps ('Paused', 'Dormant').
-    - Categorize follower tiers ('Tier 1', 'Tier 2').
-    - Find and list all matched keywords from bios and tweets.
-4. Output a clean, sorted, final DataFrame ready to be saved as a CSV.
+SMART ANALYZER - v2.0
+New features:
+1. Posting pattern detection (erratic, sparse, daily, dormant)
+2. Dual scoring system (Founders vs Projects scored differently)
+3. Struggle keyword detection with tiering
+4. Lead grading (A/B/C/F)
+5. Detailed scoring reasons
 """
 
 import logging
 import pandas as pd
-import regex  # Using 'regex' for more advanced features like word boundaries
+import regex
+import numpy as np
 from datetime import datetime, timezone
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
-# Import our "brain"
 from src import config
 
 
 class Analyzer:
-    """
-    The Analyzer class encapsulates all data transformation and business logic.
-    """
+    """Smart Analyzer with posting pattern detection and dual scoring"""
     
     def __init__(self, raw_data_list: List[Dict]):
         self.logger = logging.getLogger(__name__)
@@ -34,166 +29,344 @@ class Analyzer:
         else:
             self.df = pd.DataFrame(raw_data_list)
         
-        # --- Pre-compile all regex patterns for massive speed improvement ---
+        # Pre-compile regex patterns
         self.patterns = {
-            # Persona 1: Founder
             'founder_bio': self._compile_pattern_list(config.FOUNDER_BIO_KEYWORDS),
-            'founder_tweet': self._compile_pattern_list(config.FOUNDER_TWEET_KEYWORDS),
-            
-            # Persona 2: Project
             'project_bio': self._compile_pattern_list(config.PROJECT_BIO_KEYWORDS),
-            'project_tweet': self._compile_pattern_list(config.PROJECT_TWEET_KEYWORDS),
-            
-            # General
+            'tier1_struggle': self._compile_pattern_list(config.TIER1_STRUGGLE_KEYWORDS),
+            'tier2_struggle': self._compile_pattern_list(config.TIER2_STRUGGLE_KEYWORDS),
             'general_bio': self._compile_pattern_list(config.GENERAL_BIO_KEYWORDS),
-            'high_intent_tweet': self._compile_pattern_list(config.HIGH_INTENT_TWEET_KEYWORDS)
         }
 
     def _compile_pattern_list(self, keywords: list) -> regex.Pattern:
-        """Helper to create a single, case-insensitive regex pattern from a list."""
-        # \b ensures we match whole words (e.g., "ai" not "train")
+        """Create case-insensitive regex pattern from keyword list"""
         pattern_str = r'\b(' + '|'.join(regex.escape(k) for k in keywords) + r')\b'
         return regex.compile(pattern_str, flags=regex.IGNORECASE | regex.UNICODE)
 
     def _classify_account_type(self, bio: str) -> str:
-        """Classifies account as 'Person' or 'Project' based on bio."""
+        """Classify as 'Founder' (person) or 'Project' (brand)"""
         if not isinstance(bio, str):
             return 'Unknown'
         
-        # Check for 'Person' keywords first, as they are more specific
-        if self.patterns['founder_bio'].search(bio):
-            return 'Person'
+        bio_lower = bio.lower()
         
-        # Then check for 'Project' keywords
+        # Check for founder indicators
+        if self.patterns['founder_bio'].search(bio):
+            return 'Founder'
+        
+        # Check for project indicators
         if self.patterns['project_bio'].search(bio):
+            return 'Project'
+        
+        # Heuristic: First-person language = Founder
+        if any(word in bio_lower for word in ['i am', 'i\'m', 'my startup', 'i build']):
+            return 'Founder'
+        
+        # Heuristic: Plural language = Project
+        if any(word in bio_lower for word in ['we are', 'we\'re', 'our team', 'we build']):
             return 'Project'
         
         return 'Unknown'
 
-    def _analyze_activity(self, tweets_list: list) -> pd.Series:
-        """Parses tweet list to find activity status and days since last post."""
-        if not tweets_list or not isinstance(tweets_list, list):
-            return pd.Series({'activity_status': 'No Tweets Found', 'days_since_last_post': -1})
+    def _calculate_posting_gaps(self, tweets_list: list) -> Tuple[float, float, int]:
+        """
+        Calculate posting pattern metrics
+        Returns: (avg_gap_days, gap_variance, days_since_last_post)
+        """
+        if not tweets_list or len(tweets_list) < 2:
+            return (9999, 0, 9999)
         
         try:
-            # The scraper sorts tweets by most recent, so [0] is the latest
-            last_tweet_timestamp = tweets_list[0]['timestamp']
+            # Parse timestamps
+            timestamps = []
+            for tweet in tweets_list:
+                if 'timestamp' in tweet:
+                    ts = datetime.fromisoformat(tweet['timestamp'].replace('Z', '+00:00'))
+                    timestamps.append(ts)
             
-            # Parse ISO 8601 format: "2025-10-28T10:00:00.000Z"
-            last_tweet_time = datetime.fromisoformat(last_tweet_timestamp.replace('Z', '+00:00'))
+            if len(timestamps) < 2:
+                return (9999, 0, 9999)
             
+            # Sort by date (newest first)
+            timestamps.sort(reverse=True)
+            
+            # Calculate gaps between consecutive posts
+            gaps = []
+            for i in range(len(timestamps) - 1):
+                gap = (timestamps[i] - timestamps[i + 1]).days
+                gaps.append(gap)
+            
+            # Calculate metrics
+            avg_gap = np.mean(gaps) if gaps else 9999
+            variance = np.var(gaps) if len(gaps) > 1 else 0
+            
+            # Days since last post
             now = datetime.now(timezone.utc)
-            days_gap = (now - last_tweet_time).days
+            days_since = (now - timestamps[0]).days
             
-            # Find the correct status from our config
-            for status, (min_days, max_days) in config.ACTIVITY_GAPS.items():
-                if min_days <= days_gap <= max_days:
-                    return pd.Series({'activity_status': status, 'days_since_last_post': days_gap})
+            return (avg_gap, variance, days_since)
             
-            # Default to Dormant if it's over the max (e.g., > 90)
-            return pd.Series({'activity_status': 'Dormant', 'days_since_last_post': days_gap})
-
         except Exception as e:
-            self.logger.warning(f"Error parsing tweet timestamp: {e}. Data: {tweets_list[0]}")
-            return pd.Series({'activity_status': 'Error', 'days_since_last_post': -1})
+            self.logger.warning(f"Error calculating posting gaps: {e}")
+            return (9999, 0, 9999)
 
-    def _categorize_followers(self, followers: int) -> str:
-        """Assigns a "Follower Tier" based on the count."""
-        if not isinstance(followers, (int, float)):
-            return 'N/A'
+    def _detect_posting_pattern(self, avg_gap: float, variance: float, days_since: int) -> str:
+        """
+        Detect posting pattern based on metrics
+        Returns: 'erratic_active', 'sparse_consistent', 'comeback_kid', 'daily_poster', or 'dormant'
+        """
+        # Check dormant first
+        if days_since > 30:
+            return 'dormant'
         
-        for tier, (min_f, max_f) in config.FOLLOWER_TIERS.items():
-            if min_f <= followers <= max_f:
-                return tier
+        # Check daily poster
+        if avg_gap <= 2 and variance <= 1:
+            return 'daily_poster'
         
-        # If they are outside our defined tiers but within the filter
-        if followers < config.FOLLOWER_TIERS['Tier 1'][0]:
-            return 'Tier 0 (Sub-500)'
-        return 'N/A'
+        # Check erratic active (high variance + recent post)
+        if variance >= 4 and 2 <= avg_gap <= 7 and days_since <= 7:
+            return 'erratic_active'
+        
+        # Check sparse consistent (low variance + weekly posting)
+        if variance <= 3 and 7 <= avg_gap <= 14 and days_since <= 14:
+            return 'sparse_consistent'
+        
+        # Check comeback kid (was gone but just posted)
+        if days_since <= 7 and avg_gap > 14 and variance > 10:
+            return 'comeback_kid'
+        
+        # Default to dormant if nothing matches
+        return 'dormant'
 
-    def _find_matched_keywords(self, text: str, patterns_to_check: List[regex.Pattern]) -> list:
-        """Finds all unique keywords from a list of patterns in a text block."""
-        if not isinstance(text, str):
-            return []
+    def _find_struggle_keywords(self, tweets_list: list) -> Dict:
+        """
+        Find struggle keywords in recent tweets
+        Returns: {
+            'tier1_keywords': [...],
+            'tier2_keywords': [...],
+            'struggle_tweets': [...]
+        }
+        """
+        if not tweets_list:
+            return {'tier1_keywords': [], 'tier2_keywords': [], 'struggle_tweets': []}
         
-        matches = set()
-        for pattern in patterns_to_check:
-            found_keywords = pattern.findall(text)
-            # Add the lowercase version of each found keyword to the set
-            matches.update([k.lower() for k in found_keywords])
+        tier1_found = set()
+        tier2_found = set()
+        struggle_tweets = []
+        
+        # Check each tweet
+        for tweet in tweets_list[:10]:  # Only check first 10 (most recent)
+            if 'text' not in tweet:
+                continue
+                
+            text = tweet['text']
+            text_lower = text.lower()
             
-        return list(matches)
+            # Check Tier 1 keywords
+            tier1_matches = self.patterns['tier1_struggle'].findall(text)
+            if tier1_matches:
+                tier1_found.update([m.lower() for m in tier1_matches])
+                struggle_tweets.append({
+                    'text': text[:100] + '...' if len(text) > 100 else text,
+                    'tier': 1
+                })
+            
+            # Check Tier 2 keywords
+            tier2_matches = self.patterns['tier2_struggle'].findall(text)
+            if tier2_matches:
+                tier2_found.update([m.lower() for m in tier2_matches])
+                if not tier1_matches:  # Don't double-count tweets
+                    struggle_tweets.append({
+                        'text': text[:100] + '...' if len(text) > 100 else text,
+                        'tier': 2
+                    })
+        
+        return {
+            'tier1_keywords': list(tier1_found),
+            'tier2_keywords': list(tier2_found),
+            'struggle_tweets': struggle_tweets[:3]  # Keep top 3
+        }
+
+    def _calculate_smm_score(self, row: pd.Series) -> Dict:
+        """
+        Calculate SMM need score (0-100) with detailed reasons
+        Different logic for Founders vs Projects
+        """
+        score = 0
+        reasons = []
+        
+        account_type = row['account_type']
+        scoring_config = config.FOUNDER_SCORING if account_type == 'Founder' else config.PROJECT_SCORING
+        
+        # 1. POSTING PATTERN (40 points max)
+        pattern = row.get('posting_pattern', 'dormant')
+        pattern_score = scoring_config['posting_pattern'].get(pattern, 0)
+        score += pattern_score
+        
+        if pattern_score > 0:
+            pattern_desc = config.POSTING_PATTERNS[pattern]['description']
+            reasons.append(f"Posting: {pattern_desc} (+{pattern_score}pts)")
+        
+        # 2. STRUGGLE SIGNALS (30 points max)
+        tier1_count = len(row.get('tier1_struggle_keywords', []))
+        tier2_count = len(row.get('tier2_struggle_keywords', []))
+        
+        struggle_score = 0
+        if tier1_count > 0:
+            struggle_score += min(tier1_count * scoring_config['struggle_signals']['tier1_per_keyword'], 30)
+            reasons.append(f"Found {tier1_count} high-priority struggle signal(s)")
+        
+        if tier2_count > 0 and struggle_score < 30:
+            additional = min(tier2_count * scoring_config['struggle_signals']['tier2_per_keyword'], 
+                           30 - struggle_score)
+            struggle_score += additional
+            reasons.append(f"Found {tier2_count} struggle signal(s)")
+        
+        score += min(struggle_score, scoring_config['struggle_signals']['max_points'])
+        
+        # 3. FOLLOWER TIER (20 points max)
+        follower_count = row.get('follower_count', 0)
+        tier_score = 0
+        for (min_f, max_f), points in scoring_config['follower_tier'].items():
+            if min_f <= follower_count <= max_f:
+                tier_score = points
+                reasons.append(f"{follower_count:,} followers - good range (+{points}pts)")
+                break
+        score += tier_score
+        
+        # 4. BONUSES (up to 25 points)
+        bio = str(row.get('bio', '')).lower()
+        
+        # Founder-specific bonuses
+        if account_type == 'Founder':
+            if any(kw in bio for kw in ['founder', 'ceo', 'builder']):
+                score += scoring_config['bonus']['has_founder_keywords']
+                reasons.append("Has founder/builder identity (+10pts)")
+        
+        # Get tweets text for all checks
+        tweets_text = ' '.join([t.get('text', '') for t in row.get('tweets', [])])
+        
+        # Project-specific bonuses
+        if account_type == 'Project':
+            if any(word in tweets_text.lower() for word in ['launched', 'mvp', 'beta', 'live']):
+                score += scoring_config['bonus']['recently_launched']
+                reasons.append("Recently launched (+10pts)")
+        
+        # Common bonuses
+        if any(word in bio.lower() or word in tweets_text.lower() for word in ['raised', 'funded', 'seed', 'vc']):
+            score += scoring_config['bonus']['is_funded']
+            reasons.append("Funded/raising (+10pts)")
+        
+        if row.get('days_since_last_post', 999) <= 3:
+            score += scoring_config['bonus']['posted_last_3_days']
+            reasons.append("Posted in last 3 days (+5pts)")
+        
+        # Assign grade
+        for grade, (min_s, max_s) in config.SCORE_GRADES.items():
+            if min_s <= score <= max_s:
+                score_grade = grade
+                break
+        else:
+            score_grade = 'F'
+        
+        return {
+            'smm_need_score': min(score, 100),
+            'score_grade': score_grade,
+            'score_reasons': ' | '.join(reasons) if reasons else 'No qualifying signals'
+        }
 
     def run_analysis(self) -> pd.DataFrame:
-        """
-        Runs the full analysis pipeline on the DataFrame.
-        """
+        """Run the complete analysis pipeline"""
         if self.df.empty:
-            self.logger.warning("Analyzer DataFrame is empty. Aborting analysis.")
+            self.logger.warning("Analyzer DataFrame is empty. Aborting.")
             return pd.DataFrame()
-            
+        
         self.logger.info(f"Analyzing {len(self.df)} raw profiles...")
-
-        # 1. Classify Account Type
+        
+        # 1. Classify account type
+        self.logger.info("Step 1: Classifying accounts (Founder vs Project)...")
         self.df['account_type'] = self.df['bio'].apply(self._classify_account_type)
-
-        # 2. Analyze Activity
-        activity_data = self.df['tweets'].apply(self._analyze_activity)
-        self.df = pd.concat([self.df, activity_data], axis=1)
-
-        # 3. Categorize Followers
-        self.df['follower_tier'] = self.df['follower_count'].apply(self._categorize_followers)
-
-        # 4. Find Matched Bio Keywords
-        self.df['matched_bio_keywords'] = self.df['bio'].apply(
-            lambda x: self._find_matched_keywords(
-                x, [self.patterns['founder_bio'], self.patterns['project_bio'], self.patterns['general_bio']]
+        
+        # 2. Analyze posting patterns
+        self.logger.info("Step 2: Analyzing posting patterns...")
+        posting_data = self.df['tweets'].apply(
+            lambda t: self._calculate_posting_gaps(t) if isinstance(t, list) else (9999, 0, 9999)
+        )
+        
+        self.df['avg_gap_days'] = posting_data.apply(lambda x: x[0])
+        self.df['gap_variance'] = posting_data.apply(lambda x: x[1])
+        self.df['days_since_last_post'] = posting_data.apply(lambda x: x[2])
+        
+        self.df['posting_pattern'] = self.df.apply(
+            lambda row: self._detect_posting_pattern(
+                row['avg_gap_days'], 
+                row['gap_variance'], 
+                row['days_since_last_post']
+            ), axis=1
+        )
+        
+        # 3. Find struggle keywords
+        self.logger.info("Step 3: Detecting struggle signals...")
+        struggle_data = self.df['tweets'].apply(self._find_struggle_keywords)
+        
+        self.df['tier1_struggle_keywords'] = struggle_data.apply(lambda x: x['tier1_keywords'])
+        self.df['tier2_struggle_keywords'] = struggle_data.apply(lambda x: x['tier2_keywords'])
+        self.df['struggle_tweets'] = struggle_data.apply(lambda x: x['struggle_tweets'])
+        
+        # Combine for display
+        self.df['struggle_keywords_found'] = self.df.apply(
+            lambda row: row['tier1_struggle_keywords'] + row['tier2_struggle_keywords'], axis=1
+        )
+        
+        # 4. Categorize followers
+        self.logger.info("Step 4: Categorizing follower tiers...")
+        self.df['follower_tier'] = self.df['follower_count'].apply(
+            lambda f: next(
+                (tier for tier, (min_f, max_f) in config.FOLLOWER_TIERS.items() if min_f <= f <= max_f),
+                'N/A'
             )
         )
-
-        # 5. Find Matched Tweet Keywords
-        # First, combine all tweet texts into one giant string for analysis
-        self.df['all_tweets_text'] = self.df['tweets'].apply(
-            lambda t_list: " ".join([t['text'] for t in t_list if isinstance(t, dict) and 'text' in t])
-        )
-        self.df['matched_tweet_keywords'] = self.df['all_tweets_text'].apply(
-            lambda x: self._find_matched_keywords(
-                x, [self.patterns['founder_tweet'], self.patterns['project_tweet'], self.patterns['high_intent_tweet']]
-            )
-        )
         
-        # TODO: Engagement Analysis
-        # The current scraper.py does *not* scrape like/retweet counts, as they
-        # are harder to get and make the scrape less stable.
-        # To enable this, scraper.py would need to be upgraded to find those
-        # selectors, and this class would need a new _analyze_engagement() method.
-        # self.df['engagement_ratio'] = 0.0 # Placeholder
-
-        # 6. Final Cleanup and Column Selection
-        self.logger.info("Analysis complete. Cleaning up DataFrame...")
+        # 5. Calculate SMM need score
+        self.logger.info("Step 5: Calculating SMM need scores...")
+        scoring_results = self.df.apply(self._calculate_smm_score, axis=1)
         
-        final_columns = [
-            'handle',
-            'account_type',
-            'follower_count',
-            'follower_tier',
-            'activity_status',
-            'days_since_last_post',
-            'total_tweets',
-            'matched_bio_keywords',
-            'matched_tweet_keywords',
-            'bio',
-            'profile_url'
-        ]
+        self.df['smm_need_score'] = scoring_results.apply(lambda x: x['smm_need_score'])
+        self.df['score_grade'] = scoring_results.apply(lambda x: x['score_grade'])
+        self.df['score_reasons'] = scoring_results.apply(lambda x: x['score_reasons'])
         
-        # Ensure all columns exist before trying to select them
-        final_df = self.df[[col for col in final_columns if col in self.df.columns]].copy()
+        # 6. Filter out low-quality leads
+        self.logger.info(f"Step 6: Filtering leads (minimum score: {config.MIN_QUALIFYING_SCORE})...")
+        qualified_df = self.df[self.df['smm_need_score'] >= config.MIN_QUALIFYING_SCORE].copy()
         
-        # Sort to show the best leads first:
-        # We want "Paused" or "Dormant" accounts with high follower counts.
+        if qualified_df.empty:
+            self.logger.warning("No leads met the minimum score threshold!")
+            return pd.DataFrame()
+        
+        # 7. Select and sort output columns
+        self.logger.info("Step 7: Preparing final output...")
+        
+        final_columns = [col for col in config.OUTPUT_COLUMNS if col in qualified_df.columns]
+        final_df = qualified_df[final_columns].copy()
+        
+        # Sort by score (best leads first)
         final_df = final_df.sort_values(
-            by=['activity_status', 'follower_count'],
-            ascending=[False, False]
+            by=config.SORT_PRIORITY,
+            ascending=False
         )
-
+        
+        # Log summary
+        self.logger.info(f"\n{'='*60}")
+        self.logger.info("ANALYSIS SUMMARY")
+        self.logger.info(f"{'='*60}")
+        self.logger.info(f"Total profiles analyzed: {len(self.df)}")
+        self.logger.info(f"Qualified leads found: {len(final_df)}")
+        
+        grade_counts = final_df['score_grade'].value_counts()
+        for grade in ['A', 'B', 'C']:
+            count = grade_counts.get(grade, 0)
+            self.logger.info(f"  {grade}-grade leads: {count}")
+        
+        self.logger.info(f"{'='*60}\n")
+        
         return final_df
